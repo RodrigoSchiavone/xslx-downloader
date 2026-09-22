@@ -2,37 +2,26 @@ import os
 import sys
 import glob
 import time
+import shutil
 import asyncio
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # -------------------------------------------------------------
-# 1. CONFIGURAÇÃO IMEDIATA DO LOGGING (ANTES DE QUALQUER IMPORT MAIOR)
+# 1. CONFIGURAÇÃO DE DIRETÓRIOS E LOGGING
 # -------------------------------------------------------------
-# Carrega as variáveis de ambiente (.env)
 load_dotenv()
 
-# Define e cria o diretório de destino
-ENV_OUTPUT_DIR = os.getenv("OUTPUT_DIR", "").strip()
-if ENV_OUTPUT_DIR:
-    DOWNLOAD_DIR = os.path.abspath(ENV_OUTPUT_DIR)
+# Pasta base do executável (onde o .exe está rodando)
+if getattr(sys, 'frozen', False):
+    EXE_DIR = os.path.dirname(sys.executable)
 else:
-    # Se rodar como .exe ou script, garante o caminho relativo ao executável/script
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-    DOWNLOAD_DIR = os.path.join(base_dir, "downloads")
+    EXE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Garante que a pasta existe para salvar o log
-try:
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-except Exception as e:
-    # Caso falhe a criação da pasta customizada, força a pasta atual
-    DOWNLOAD_DIR = os.getcwd()
-
-LOG_FILE = os.path.join(DOWNLOAD_DIR, "execucao.log")
+# Logs e Screenshots sempre salvos na mesma pasta do executável
+LOG_DIR = EXE_DIR
+LOG_FILE = os.path.join(LOG_DIR, "execucao.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +33,7 @@ logging.basicConfig(
     ]
 )
 
-# Captura erros não tratados no Python e grava no log
+# Captura de erros fatais
 def handle_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -53,13 +42,12 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = handle_exception
 
-# Log de inicialização garantido
 logging.info("=" * 60)
 logging.info("🚀 INICIANDO APLICAÇÃO")
-logging.info(f"📂 Diretório de saída/logs definido em: {DOWNLOAD_DIR}")
+logging.info(f"📂 Pasta local do executável (Logs/Screenshots): {EXE_DIR}")
 logging.info("=" * 60)
 
-# Importações restantes (feitas após a configuração dos logs)
+# Importações após logger pronto
 try:
     from playwright.async_api import async_playwright
     import pandas as pd
@@ -68,12 +56,24 @@ except Exception as err:
     logging.critical("💥 ERRO AO IMPORTAR BIBLIOTECAS NECESSÁRIAS:", exc_info=True)
     sys.exit(1)
 
+# Leitura e tratamento dos caminhos de saída
+ENV_OUTPUT_DIR = os.getenv("OUTPUT_DIR", "").strip().strip('"').strip("'")
+ENV_OUTPUT_DIR_2 = os.getenv("OUTPUT_DIR_2", "").strip().strip('"').strip("'")
+
+DOWNLOAD_DIR = os.path.normpath(ENV_OUTPUT_DIR) if ENV_OUTPUT_DIR else os.path.join(EXE_DIR, "downloads")
+OUTPUT_DIR_2 = os.path.normpath(ENV_OUTPUT_DIR_2) if ENV_OUTPUT_DIR_2 else None
+
+# Garante criação das pastas de saída
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+if OUTPUT_DIR_2:
+    os.makedirs(OUTPUT_DIR_2, exist_ok=True)
+
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 SHAREPOINT_URL = os.getenv("SHAREPOINT_URL")
-STATE_FILE = os.path.join(DOWNLOAD_DIR, "state.json")
+STATE_FILE = os.path.join(EXE_DIR, "state.json")
 
-# Remove o arquivo de sessão antigo caso exista
+# Limpeza de sessão antiga
 if os.path.exists(STATE_FILE):
     try:
         os.remove(STATE_FILE)
@@ -83,10 +83,6 @@ if os.path.exists(STATE_FILE):
 
 
 async def clicar_elemento_em_frames(page, textos):
-    """
-    Procura e clica num elemento pelo texto, buscando no documento principal
-    e em todos os IFrames ativos na página.
-    """
     for frame in page.frames:
         for texto in textos:
             try:
@@ -101,20 +97,16 @@ async def clicar_elemento_em_frames(page, textos):
 
 def processar_e_salvar_planilha(caminho_arquivo):
     """
-    Realiza o pós-processamento da planilha:
-    1. Lê a planilha baixada removendo as 4 primeiras linhas.
-    2. Exclui a 8ª coluna (índice 7) e depois a 1ª coluna (índice 0).
-    3. Salva a planilha com a data atual no formato DD-MM-YYYY.xlsx.
+    Trata a planilha baixada e salva nas duas pastas configuradas.
     """
     data_hoje = datetime.now().strftime("%d-%m-%Y")
     logging.info(f"📂 Processando arquivo baixado: {os.path.basename(caminho_arquivo)}")
 
+    # 1. Leitura e exclusão de colunas
     df = pd.read_excel(caminho_arquivo, skiprows=4)
-
     total_colunas = df.shape[1]
     logging.info(f"📊 Quantidade inicial de colunas tratadas: {total_colunas}")
 
-    # Excluir a 8ª coluna (índice 7)
     if total_colunas >= 8:
         coluna_8_nome = df.columns[7]
         df.drop(df.columns[7], axis=1, inplace=True)
@@ -122,24 +114,32 @@ def processar_e_salvar_planilha(caminho_arquivo):
     else:
         logging.warning("⚠️ A planilha possui menos de 8 colunas. Remoção da 8ª coluna ignorada.")
 
-    # Excluir a 1ª coluna (índice 0)
     if df.shape[1] >= 1:
         coluna_1_nome = df.columns[0]
         df.drop(df.columns[0], axis=1, inplace=True)
         logging.info(f"🗑️ 1ª coluna removida: '{coluna_1_nome}'")
 
+    # 2. Salva no 1º destino (Com data: DD-MM-YYYY.xlsx)
     nome_novo_arquivo = f"{data_hoje}.xlsx"
-    caminho_novo_arquivo = os.path.join(DOWNLOAD_DIR, nome_novo_arquivo)
+    caminho_destino_1 = os.path.join(DOWNLOAD_DIR, nome_novo_arquivo)
+    df.to_excel(caminho_destino_1, index=False)
+    logging.info(f"🎉 Planilha salva com sucesso em (Destino 1): {caminho_destino_1}")
 
-    df.to_excel(caminho_novo_arquivo, index=False)
+    # 3. Copia para o 2º destino (Nome fixo: Disponibilidade Marcelo.xlsx)
+    if OUTPUT_DIR_2:
+        caminho_destino_2 = os.path.join(OUTPUT_DIR_2, "Disponibilidade Marcelo.xlsx")
+        try:
+            shutil.copy2(caminho_destino_1, caminho_destino_2)
+            logging.info(f"📋 Cópia criada com sucesso em (Destino 2): {caminho_destino_2}")
+        except Exception as e:
+            logging.error(f"❌ Erro ao copiar arquivo para o Destino 2 ({caminho_destino_2}): {e}")
 
-    logging.info(f"🎉 PÓS-PROCESSAMENTO CONCLUÍDO COM SUCESSO! Planilha salva em: {caminho_novo_arquivo}")
-    return caminho_novo_arquivo
+    return caminho_destino_1
 
 
 async def main():
     if not GMAIL_USER or not GMAIL_APP_PASSWORD or not SHAREPOINT_URL:
-        logging.error("❌ ERRO CRÍTICO: GMAIL_USER, GMAIL_APP_PASSWORD ou SHAREPOINT_URL ausentes no ficheiro .env!")
+        logging.error("❌ ERRO CRÍTICO: GMAIL_USER, GMAIL_APP_PASSWORD ou SHAREPOINT_URL ausentes no .env!")
         return
 
     try:
@@ -160,7 +160,7 @@ async def main():
             logging.info(f"🌐 Acessando SharePoint: {SHAREPOINT_URL}")
             await page.goto(SHAREPOINT_URL, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "01_pagina_carregada.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "01_pagina_carregada.png"))
 
             # 1. AUTENTICAÇÃO
             logging.info("🟡 Preenchendo e-mail de acesso...")
@@ -169,7 +169,7 @@ async def main():
             
             await email_locator.click()
             await email_locator.fill(GMAIL_USER)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "02_email_preenchido.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "02_email_preenchido.png"))
 
             logging.info("🚀 Enviando e-mail de verificação...")
             timestamp_solicitacao = datetime.now(timezone.utc)
@@ -181,12 +181,12 @@ async def main():
                 await email_locator.press("Enter")
 
             await page.wait_for_timeout(1500)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "03_logo_apos_clicar_next.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "03_logo_apos_clicar_next.png"))
 
             logging.info("⏳ Localizando campo OTP (#txtTOAACode)...")
             otp_locator = page.locator("#txtTOAACode, input[name='txtTOAACode']").first
             await otp_locator.wait_for(state="visible", timeout=20000)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "04_tela_otp_visivel.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "04_tela_otp_visivel.png"))
 
             logging.info("📩 Consultando código no Gmail via IMAP...")
             codigo_otp = await asyncio.to_thread(
@@ -199,7 +199,7 @@ async def main():
             logging.info(f"🔑 Preenchendo código OTP: {codigo_otp}")
             await otp_locator.click()
             await otp_locator.fill(codigo_otp)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "05_otp_digitado.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "05_otp_digitado.png"))
 
             logging.info("🚀 Confirmando código OTP...")
             btn_verificar = page.locator("#btnSubmitCode, input[name='btnSubmitCode']").first
@@ -209,12 +209,12 @@ async def main():
                 await otp_locator.press("Enter")
 
             await page.wait_for_timeout(5000)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "06_pos_submissao_otp.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "06_pos_submissao_otp.png"))
 
-            # 2. DOWNLOAD VIA FLUENT UI (EXCEL ONLINE)
+            # 2. DOWNLOAD VIA FLUENT UI
             logging.info("📊 Aguardando carregamento da interface da planilha (12s)...")
             await page.wait_for_timeout(12000)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "07_excel_carregado.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "07_excel_carregado.png"))
 
             logging.info("📥 1. Abrindo menu 'Arquivo' / 'Filer'...")
             clicou = await clicar_elemento_em_frames(page, ["Arquivo", "Filer", "File"])
@@ -223,12 +223,12 @@ async def main():
                 logging.info("⚠️ Tentando atalho de teclado Alt+A / Alt+F...")
                 await page.keyboard.press("Alt+a")
                 await page.wait_for_timeout(1000)
-                await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "07b_tentativa_atalho.png"))
+                await page.screenshot(path=os.path.join(EXE_DIR, "07b_tentativa_atalho.png"))
                 if not await page.get_by_text("Criar uma Cópia", exact=True).is_visible():
                     await page.keyboard.press("Alt+f")
 
             await page.wait_for_timeout(2000)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "08_menu_arquivo_aberto.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "08_menu_arquivo_aberto.png"))
 
             logging.info("📥 2. Clicando em 'Criar uma Cópia'...")
             clicou_copia = await clicar_elemento_em_frames(page, ["Criar uma Cópia", "Opret en kopi", "Save As", "Salvar como"])
@@ -236,7 +236,7 @@ async def main():
                 await page.locator("text=/Criar uma Cópia/i, text=/Opret en kopi/i").first.click()
 
             await page.wait_for_timeout(2000)
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "09_sub_menu_copia_aberto.png"))
+            await page.screenshot(path=os.path.join(EXE_DIR, "09_sub_menu_copia_aberto.png"))
 
             logging.info("📥 3. Clicando em 'Baixar uma Cópia'...")
             async with page.expect_download(timeout=60000) as download_info:
@@ -244,7 +244,7 @@ async def main():
                 if not clicou_baixar:
                     await page.locator("text=/Baixar uma Cópia/i, text=/Download en kopi/i").first.click()
 
-                await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "10_clique_baixar_copia.png"))
+                await page.screenshot(path=os.path.join(EXE_DIR, "10_clique_baixar_copia.png"))
                 
                 await page.wait_for_timeout(2000)
                 for frame in page.frames:
@@ -252,23 +252,30 @@ async def main():
                         btn_confirmar = frame.locator("button:has-text('Baixar uma Cópia'), button:has-text('Download'), button:has-text('Baixar')").last
                         if await btn_confirmar.is_visible(timeout=1000):
                             logging.info("🔘 Clicando na confirmação do modal de download...")
-                            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "11_modal_confirmacao.png"))
+                            await page.screenshot(path=os.path.join(EXE_DIR, "11_modal_confirmacao.png"))
                             await btn_confirmar.click()
                             break
                     except Exception:
                         continue
 
             download = await download_info.value
-            caminho_final = os.path.join(DOWNLOAD_DIR, download.suggested_filename)
-            await download.save_as(caminho_final)
+            caminho_temp = os.path.join(EXE_DIR, download.suggested_filename)
+            await download.save_as(caminho_temp)
 
-            logging.info(f"🎉 DOWNLOAD CONCLUÍDO COM SUCESSO: {caminho_final}")
+            logging.info(f"🎉 DOWNLOAD TEMPORÁRIO CONCLUÍDO: {caminho_temp}")
 
-            # 3. PÓS-PROCESSAMENTO DA PLANILHA
+            # 3. PÓS-PROCESSAMENTO E ENVIO
             logging.info("⚙️ Iniciando pós-processamento com Pandas...")
-            processar_e_salvar_planilha(caminho_final)
+            processar_e_salvar_planilha(caminho_temp)
 
-            await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "12_download_concluido.png"))
+            # Limpa o download bruto original temporário
+            if os.path.exists(caminho_temp):
+                try:
+                    os.remove(caminho_temp)
+                except Exception:
+                    pass
+
+            await page.screenshot(path=os.path.join(EXE_DIR, "12_download_concluido.png"))
             await context.close()
             await browser.close()
             
@@ -279,4 +286,7 @@ async def main():
         logging.error("❌ EXECUÇÃO FINALIZADA COM ERROS.\n")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logging.critical("💥 FALHA CRÍTICA AO EXECUTAR A APLICAÇÃO:", exc_info=True)

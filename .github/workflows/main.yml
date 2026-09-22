@@ -34,7 +34,7 @@ jobs:
     - name: Build Executable with PyInstaller
       run: |
         $PLAYWRIGHT_PATH = (python -c "import os, playwright; print(os.path.join(os.path.dirname(playwright.__file__), 'driver', 'package', '.local-browsers'))")
-        pyinstaller --onefile  --add-data "$PLAYWRIGHT_PATH;playwright/driver/package/.local-browsers" --name "DownloaderSharePoint" main.py
+        pyinstaller --onefile --noconsole --add-data "$PLAYWRIGHT_PATH;playwright/driver/package/.local-browsers" --name "DownloaderSharePoint" main.py
 
     - name: Upload Executable Artifact
       uses: actions/upload-artifact@v4
