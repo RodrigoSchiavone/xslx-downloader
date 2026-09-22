@@ -1,37 +1,37 @@
 import os
-import re
+import sys
 import glob
 import time
 import asyncio
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
-import pandas as pd
 
-from gmail_helper import obter_codigo_verificacao
-
+# -------------------------------------------------------------
+# 1. CONFIGURAÇÃO IMEDIATA DO LOGGING (ANTES DE QUALQUER IMPORT MAIOR)
+# -------------------------------------------------------------
 # Carrega as variáveis de ambiente (.env)
 load_dotenv()
 
-GMAIL_USER = os.getenv("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-SHAREPOINT_URL = os.getenv("SHAREPOINT_URL")
-STATE_FILE = "state.json"
-
-# Configuração dinâmica da pasta de destino (Lê do .env ou usa 'downloads' por padrão)
+# Define e cria o diretório de destino
 ENV_OUTPUT_DIR = os.getenv("OUTPUT_DIR", "").strip()
 if ENV_OUTPUT_DIR:
     DOWNLOAD_DIR = os.path.abspath(ENV_OUTPUT_DIR)
 else:
-    DOWNLOAD_DIR = os.path.abspath("downloads")
+    # Se rodar como .exe ou script, garante o caminho relativo ao executável/script
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    DOWNLOAD_DIR = os.path.join(base_dir, "downloads")
 
-# Garantia da existência da pasta de destino
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# Garante que a pasta existe para salvar o log
+try:
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+except Exception as e:
+    # Caso falhe a criação da pasta customizada, força a pasta atual
+    DOWNLOAD_DIR = os.getcwd()
 
-# -------------------------------------------------------------
-# CONFIGURAÇÃO DE LOGGING (ARQUIVO + TERMINAL)
-# -------------------------------------------------------------
 LOG_FILE = os.path.join(DOWNLOAD_DIR, "execucao.log")
 
 logging.basicConfig(
@@ -44,11 +44,40 @@ logging.basicConfig(
     ]
 )
 
+# Captura erros não tratados no Python e grava no log
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.critical("💥 ERRO CRÍTICO NÃO TRATADO NA EXECUÇÃO:", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = handle_exception
+
+# Log de inicialização garantido
+logging.info("=" * 60)
+logging.info("🚀 INICIANDO APLICAÇÃO")
+logging.info(f"📂 Diretório de saída/logs definido em: {DOWNLOAD_DIR}")
+logging.info("=" * 60)
+
+# Importações restantes (feitas após a configuração dos logs)
+try:
+    from playwright.async_api import async_playwright
+    import pandas as pd
+    from gmail_helper import obter_codigo_verificacao
+except Exception as err:
+    logging.critical("💥 ERRO AO IMPORTAR BIBLIOTECAS NECESSÁRIAS:", exc_info=True)
+    sys.exit(1)
+
+GMAIL_USER = os.getenv("GMAIL_USER")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+SHAREPOINT_URL = os.getenv("SHAREPOINT_URL")
+STATE_FILE = os.path.join(DOWNLOAD_DIR, "state.json")
+
 # Remove o arquivo de sessão antigo caso exista
 if os.path.exists(STATE_FILE):
     try:
         os.remove(STATE_FILE)
-        logging.info(f"🧹 Arquivo de sessão antigo '{STATE_FILE}' removido para garantir fluxo do zero.")
+        logging.info(f"🧹 Arquivo de sessão antigo '{STATE_FILE}' removido.")
     except Exception as e:
         logging.warning(f"⚠️ Não foi possível remover {STATE_FILE}: {e}")
 
@@ -73,20 +102,19 @@ async def clicar_elemento_em_frames(page, textos):
 def processar_e_salvar_planilha(caminho_arquivo):
     """
     Realiza o pós-processamento da planilha:
-    1. Lê a planilha baixada removendo as 4 primeiras linhas (cola como valor).
+    1. Lê a planilha baixada removendo as 4 primeiras linhas.
     2. Exclui a 8ª coluna (índice 7) e depois a 1ª coluna (índice 0).
-    3. Salva a planilha com a data atual no formato DD-MM-YYYY.xlsx na pasta de saída.
+    3. Salva a planilha com a data atual no formato DD-MM-YYYY.xlsx.
     """
     data_hoje = datetime.now().strftime("%d-%m-%Y")
     logging.info(f"📂 Processando arquivo baixado: {os.path.basename(caminho_arquivo)}")
 
-    # 1. Lê a planilha pulando as 4 primeiras linhas (linhas 1, 2, 3 e 4 do Excel)
     df = pd.read_excel(caminho_arquivo, skiprows=4)
 
     total_colunas = df.shape[1]
     logging.info(f"📊 Quantidade inicial de colunas tratadas: {total_colunas}")
 
-    # 2. Excluir a 8ª coluna (índice 7)
+    # Excluir a 8ª coluna (índice 7)
     if total_colunas >= 8:
         coluna_8_nome = df.columns[7]
         df.drop(df.columns[7], axis=1, inplace=True)
@@ -94,13 +122,12 @@ def processar_e_salvar_planilha(caminho_arquivo):
     else:
         logging.warning("⚠️ A planilha possui menos de 8 colunas. Remoção da 8ª coluna ignorada.")
 
-    # 3. Excluir a 1ª coluna (índice 0)
+    # Excluir a 1ª coluna (índice 0)
     if df.shape[1] >= 1:
         coluna_1_nome = df.columns[0]
         df.drop(df.columns[0], axis=1, inplace=True)
         logging.info(f"🗑️ 1ª coluna removida: '{coluna_1_nome}'")
 
-    # 4. Salvar novo arquivo com a data atual na pasta configurada
     nome_novo_arquivo = f"{data_hoje}.xlsx"
     caminho_novo_arquivo = os.path.join(DOWNLOAD_DIR, nome_novo_arquivo)
 
@@ -111,13 +138,8 @@ def processar_e_salvar_planilha(caminho_arquivo):
 
 
 async def main():
-    logging.info("=" * 60)
-    logging.info("🚀 INICIANDO EXECUÇÃO DA AUTOMAÇÃO DE DOWNLOAD")
-    logging.info(f"📂 Pasta de destino e logs: {DOWNLOAD_DIR}")
-    logging.info("=" * 60)
-
     if not GMAIL_USER or not GMAIL_APP_PASSWORD or not SHAREPOINT_URL:
-        logging.error("❌ ERRO CRÍTICO: GMAIL_USER, GMAIL_APP_PASSWORD ou SHAREPOINT_URL ausentes no .env!")
+        logging.error("❌ ERRO CRÍTICO: GMAIL_USER, GMAIL_APP_PASSWORD ou SHAREPOINT_URL ausentes no ficheiro .env!")
         return
 
     try:
@@ -140,9 +162,7 @@ async def main():
             await page.wait_for_timeout(2000)
             await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "01_pagina_carregada.png"))
 
-            # -------------------------------------------------------------
             # 1. AUTENTICAÇÃO
-            # -------------------------------------------------------------
             logging.info("🟡 Preenchendo e-mail de acesso...")
             email_locator = page.locator("input[type='email'], input[name='i0116'], input[id='i0116']").first
             await email_locator.wait_for(state="visible", timeout=15000)
@@ -191,9 +211,7 @@ async def main():
             await page.wait_for_timeout(5000)
             await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "06_pos_submissao_otp.png"))
 
-            # -------------------------------------------------------------
             # 2. DOWNLOAD VIA FLUENT UI (EXCEL ONLINE)
-            # -------------------------------------------------------------
             logging.info("📊 Aguardando carregamento da interface da planilha (12s)...")
             await page.wait_for_timeout(12000)
             await page.screenshot(path=os.path.join(DOWNLOAD_DIR, "07_excel_carregado.png"))
@@ -246,9 +264,7 @@ async def main():
 
             logging.info(f"🎉 DOWNLOAD CONCLUÍDO COM SUCESSO: {caminho_final}")
 
-            # -------------------------------------------------------------
             # 3. PÓS-PROCESSAMENTO DA PLANILHA
-            # -------------------------------------------------------------
             logging.info("⚙️ Iniciando pós-processamento com Pandas...")
             processar_e_salvar_planilha(caminho_final)
 
@@ -259,8 +275,8 @@ async def main():
             logging.info("✅ EXECUÇÃO FINALIZADA COM SUCESSO!\n")
 
     except Exception as e:
-        logging.error(f"❌ OCORREU UM ERRO DURANTE A EXECUÇÃO DA AUTOMAÇÃO:", exc_info=True)
+        logging.error("❌ OCORREU UM ERRO DURANTE A EXECUÇÃO DA AUTOMAÇÃO:", exc_info=True)
         logging.error("❌ EXECUÇÃO FINALIZADA COM ERROS.\n")
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())
