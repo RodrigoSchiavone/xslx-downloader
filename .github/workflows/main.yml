@@ -1,51 +1,43 @@
-name: Build Windows Executable
+name: Build Executable
 
 on:
   push:
     branches:
       - main
-      - master
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout do código
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Configurar Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
-      - name: Instalar Dependências
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      - name: Instalar Navegadores do Playwright
-        run: |
-          playwright install chromium
+    - name: Install Playwright Browsers
+      run: |
+        $env:PLAYWRIGHT_BROWSERS_PATH="0"
+        python -m playwright install chromium
 
-      - name: Compilar Executável com PyInstaller
-        shell: pwsh
-        run: |
-          $PLAYWRIGHT_PATH = (python -c "import os, playwright; print(os.path.join(os.path.dirname(playwright.__file__), 'driver', 'package', '.local-browsers'))")
-          
-          pyinstaller --noconfirm --onedir --console `
-            --name "DownloaderSharePoint" `
-            --add-data "$PLAYWRIGHT_PATH;playwright/driver/package/.local-browsers" `
-            main.py
+    - name: Build Executable with PyInstaller
+      run: |
+        $PLAYWRIGHT_PATH = (python -c "import os, playwright; print(os.path.join(os.path.dirname(playwright.__file__), 'driver', 'package', '.local-browsers'))")
+        pyinstaller --onefile --noconsole --add-data "$PLAYWRIGHT_PATH;playwright/driver/package/.local-browsers" --name "DownloaderSharePoint" main.py
 
-      - name: Compactar pasta do executável
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist/DownloaderSharePoint/* -DestinationPath dist/DownloaderSharePoint-Windows.zip
-
-      - name: Disponibilizar Executável nos Artifacts do GitHub
-        uses: actions/upload-artifact@v4
-        with:
-          name: DownloaderSharePoint-Executable
-          path: dist/DownloaderSharePoint-Windows.zip
-          retention-days: 7
+    - name: Upload Executable Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: DownloaderSharePoint-Windows
+        path: dist/DownloaderSharePoint.exe
